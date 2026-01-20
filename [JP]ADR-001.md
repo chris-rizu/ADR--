@@ -1,499 +1,627 @@
-# AI駆動型著作権侵害検出システム
+これは、GCP（Google Cloud Platform）を活用したシステムに関する非常に詳細な技術仕様書ですね。上司の平敷（ひらしき）さんに提出することを想定し、専門用語を適切に残しつつ、日本の開発現場で一般的に使われる自然な技術日本語に翻訳します。
 
-## システムアーキテクチャ概要
-
-大規模な著作権コンテンツ検出のための、本番環境対応の包括的なアーキテクチャを設計します。
+コード内のコメントも、機能が伝わるように日本語化しています。
 
 ---
 
-## ハイレベルアーキテクチャ
+# GCPベース AI活用型著作権侵害検知システム
 
-```
+## システムアーキテクチャ概要
+
+### ハイレベルアーキテクチャ
+
+```text
 ┌─────────────────────────────────────────────────────────────┐
-│                     取り込みレイヤー                          │
-│  • 画像アップロードAPI (REST/gRPC)                           │
-│  • バッチ処理キュー (SQS/Kafka)                              │
-│  • 入力検証・前処理                                          │
+│                     インジェッション（取込）層                │
+│  • Cloud Storage アップロード (署名付きURL)                  │
+│  • Cloud Pub/Sub (メッセージキュー)                          │
+│  • 入力検証と前処理                                          │
 └────────────────┬────────────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  特徴抽出レイヤー                             │
+│                      特徴量抽出層                            │
 │  ┌──────────────────┐         ┌─────────────────┐          │
-│  │ 視覚パイプライン  │         │  OCRパイプライン │          │
-│  │  • パーセプチュアル│         │  • Tesseract    │          │
-│  │    ハッシュ       │         │  • EasyOCR      │          │
-│  │  • CLIP/DINO     │         │  • PaddleOCR    │          │
-│  │    埋め込み      │         │  • テキスト抽出  │          │
-│  │  • 特徴ベクトル   │         │                 │          │
+│  │ 視覚的パイプライン  │         │  OCRパイプライン   │          │
+│  │  • 知覚的ハッシュ   │         │  • Cloud Vision │          │
+│  │    (Perceptual   │         │    API          │          │
+│  │     Hashing)     │         │  • Document AI  │          │
+│  │  • Vertex AI     │         │  • テキスト分析     │          │
+│  │    マルチモーダル   │         │                 │          │
+│  │    埋め込み       │         │                 │          │
+│  │  • 特徴ベクトル     │         │                 │          │
 │  └──────────────────┘         └─────────────────┘          │
 └────────────┬──────────────────────────┬────────────────────┘
              │                          │
              ▼                          ▼
 ┌─────────────────────────┐  ┌──────────────────────────────┐
-│  類似度マッチング        │  │  著作権テキスト分析           │
-│  • ベクトルDB検索       │  │  • パターンマッチング         │
-│  • 近似最近傍探索       │  │  • エンティティ認識           │
-│  • 多層マッチング       │  │  • 年号・出版社抽出           │
+│   類似性マッチング        │  │      著作権テキスト分析        │
+│  • Vertex AI Vector     │  │  • パターンマッチング           │
+│  •   Search (Matching   │  │  • エンティティ認識             │
+│      Engine)            │  │  • 年/出版社抽出               │
+│  • 近似最近傍探索 (ANN)   │  │  • Natural Language API      │
+│  • マルチレベルマッチング  │  │                              │
 └────────────┬────────────┘  └─────────────┬────────────────┘
              │                              │
              └──────────────┬───────────────┘
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    判定エンジン                              │
-│  • スコア集約・重み付け                                      │
-│  • 閾値ベース分類                                           │
-│  • 説明可能性生成                                           │
+│                      判定エンジン                            │
+│  • スコア集計と重み付け                                      │
+│  • 閾値ベースの分類                                          │
+│  • 説明可能性 (Explainability) 生成                          │
+│  • Cloud Functions (オーケストレーション)                     │
 └────────────────┬────────────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    出力レイヤー                              │
-│  • マッチング結果 (JSON/Protobuf)                           │
-│  • 信頼度スコア・証拠                                        │
-│  • 監査ログ・分析                                           │
+│                       出力層                                 │
+│  • マッチング結果 (JSON/Protobuf)                            │
+│  • 信頼度スコアと証拠データ                                   │
+│  • 監査ログ (Cloud Logging)                                  │
+│  • 分析 (BigQuery)                                          │
 └─────────────────────────────────────────────────────────────┘
-```
 
----
+```
 
 ## 詳細コンポーネント設計
 
-### 1. **取り込みレイヤー**
+### 1. インジェッション（取込）層
 
-**目的**: 画像を受け取り、検証、前処理を行い、処理パイプラインへルーティングする。
+**目的:** 画像を受け入れ、検証、前処理を行い、GCPネイティブサービスを使用して処理パイプラインへルーティングする。
 
-**コンポーネント**:
-- **APIゲートウェイ**: FastAPIまたはAWS API Gateway（RESTエンドポイント用）
-- **メッセージキュー**: Apache KafkaまたはAWS SQS（バッチ処理用）
-- **前処理**: 画像正規化（標準寸法へのリサイズ、フォーマット変換）
+**コンポーネント:**
 
-**フロー**:
-```
-ユーザーアップロード → API検証 → 重複排除 → キュー → 処理
-```
+* **A. Cloud Storage (入力バケット)**
+* **構成:**
+* 高可用性のためのマルチリージョンバケット
+* オブジェクトライフサイクル管理（処理済み画像は30日後に自動削除）
+* IAMによる均一なバケットレベルアクセス
+* 監査証跡のためにオブジェクトのバージョニングを有効化
 
----
 
-### 2. **視覚類似度パイプライン**
 
-複数の補完的な技術を使用したコアマッチングエンジンです。
 
-#### **A. パーセプチュアルハッシュ（高速近似マッチング）**
+* **B. Cloud Storage トリガー + Cloud Pub/Sub**
+* **イベントフロー:** 画像アップロード → Cloud Storage トリガー → Pub/Sub メッセージ → Cloud Run/Functions
+* **Pub/Sub トピック:**
+* `image-upload-events`: 新規画像通知
+* `batch-processing-queue`: 一括処理リクエスト
+* `priority-queue`: 優先度の高いリアルタイムチェック
+* `retry-queue`: 指数バックオフを伴う処理失敗時のリトライ
 
-**アルゴリズム**:
-- **pHash**（パーセプチュアルハッシュ）: 軽微な変更に強い
-- **dHash**（差分ハッシュ）: 高速、完全一致・準一致に適している
-- **wHash**（ウェーブレットハッシュ）: トリミング耐性が高い
 
-**使用例**: 完全一致・準一致の高速一次フィルタリング
 
-**実装**:
+
+* **C. API Gateway (Cloud Endpoints + Cloud Run)**
+* **エンドポイント:**
+* `POST /api/v1/check/image` - 単一画像のアップロード
+* `POST /api/v1/check/batch` - バッチアップロード（ジョブIDを返す）
+* `GET /api/v1/status/{job_id}` - 処理状況の確認
+* `GET /api/v1/results/{job_id}` - 結果の取得
+
+
+
+
+* **D. 前処理サービス (Cloud Functions Gen2)**
+
 ```python
-from imagehash import phash, dhash, whash
+# Cloud Functionとしてデプロイ
+import functions_framework
+from google.cloud import storage
 from PIL import Image
+import io
 
-def generate_perceptual_hashes(image_path):
-    img = Image.open(image_path)
-    return {
-        'phash': str(phash(img)),
-        'dhash': str(dhash(img)),
-        'whash': str(whash(img))
-    }
-```
-
-**ストレージ**: Redisまたはハミング距離クエリに対応した専用ハッシュデータベース
-
----
-
-#### **B. ディープラーニング埋め込み（意味的類似性）**
-
-**推奨モデル**:
-
-1. **CLIP（Contrastive Language-Image Pre-training）**
-   - **モデル**: OpenAI CLIP（ViT-L/14またはViT-B/32）
-   - **強み**: マルチモーダル理解、変換に強い
-   - **埋め込みサイズ**: 512または768次元
-   - **用途**: 主要な意味的類似性検出
-
-2. **DINOv2**（自己教師あり Vision Transformer）
-   - **モデル**: Meta の DINOv2（ViT-L/14またはViT-g/14）
-   - **強み**: テキストなしで優れた視覚特徴、細粒度マッチングに最適
-   - **用途**: 視覚重視コンテンツの二次マッチング
-
-3. **EfficientNetまたはResNet**（フォールバック）
-   - **モデル**: EfficientNet-B7またはResNet-152
-   - **用途**: リソース制約のあるシナリオ向けの軽量代替案
-
-**実装例**:
-```python
-import torch
-from transformers import CLIPProcessor, CLIPModel
-
-model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
-
-def extract_clip_embedding(image):
-    inputs = processor(images=image, return_tensors="pt")
-    with torch.no_grad():
-        image_features = model.get_image_features(**inputs)
-    return image_features.cpu().numpy().flatten()
-```
-
----
-
-#### **C. 効率的な検索のためのベクトルデータベース**
-
-**推奨ソリューション**:
-
-1. **Pinecone**（マネージド、最も簡単）
-   - 自動スケーリング、低レイテンシ
-   - 組み込みHNSWインデックス
-   - 本番環境に最適
-
-2. **Milvus**（オープンソース、柔軟性が高い）
-   - セルフホストまたはZilliz Cloud
-   - GPUアクセラレーションサポート
-   - 大規模展開に最適
-
-3. **FAISS**（Facebook AI Similarity Search）
-   - ライブラリレベルの統合
-   - カスタムインフラストラクチャが必要
-   - セルフマネージドの場合は最高のパフォーマンス
-
-4. **WeaviateまたはQdrant**（代替案）
-   - 機能と使いやすさのバランスが良い
-
-**インデックス戦略**:
-- 近似最近傍探索には**HNSW**（Hierarchical Navigable Small World）を使用
-- より高速なクエリのために画像カテゴリ/出版社ごとにパーティション分割
-- 異なる埋め込みモデル用に別々のインデックスを維持
-
-**クエリフロー**:
-```
-入力画像 → 埋め込み抽出 → ベクトルDBクエリ（k-NN）
-→ 類似度スコア付きトップN候補を返す
-```
-
-**スケーラビリティ**:
-- **数百万枚の画像**: 単一のMilvus/Pineconeクラスター
-- **数億枚の画像**: カテゴリ/日付別にシャード化されたインデックス
-- 適切なGPUアクセラレーションで**100ms以下のレイテンシ**を達成可能
-
----
-
-### 3. **OCRパイプライン**
-
-堅牢性のための**マルチエンジンアプローチ**:
-
-1. **Tesseract OCR**（オープンソースベースライン）
-   - LSTMモデルを搭載したバージョン5.x
-   - クリーンで水平なテキストに適している
-
-2. **EasyOCR**（ディープラーニングベース）
-   - 複数の向きに対応
-   - 複雑な背景に強い
-   - 80以上の言語サポート
-
-3. **PaddleOCR**（高度）
-   - 回転/歪んだテキストに優れている
-   - 軽量で高速
-
-4. **クラウドOCR API**（オプションのフォールバック）
-   - Google Cloud Vision API
-   - AWS Textract
-   - Azure Computer Vision
-
-**実装**:
-```python
-import easyocr
-import re
-
-reader = easyocr.Reader(['ja', 'en'])  # 日本語と英語をサポート
-
-def extract_copyright_text(image_path):
-    results = reader.readtext(image_path)
-    text = ' '.join([item[1] for item in results])
+@functions_framework.cloud_event
+def preprocess_image(cloud_event):
+    """
+    Cloud Storageへのアップロードによってトリガーされる
+    - 画像形式の検証
+    - 寸法の正規化 (最大2048px)
+    - 標準フォーマット (JPEG) への変換
+    - 処理キューへのパブリッシュ
+    """
+    bucket_name = cloud_event.data["bucket"]
+    file_name = cloud_event.data["name"]
     
-    # 著作権記号のパターンマッチング
-    patterns = {
-        'copyright_symbol': r'[©Ⓒⓒ]',
-        'copyright_word': r'\b[Cc]opyright|著作権\b',
-        'rights_reserved': r'[Aa]ll [Rr]ights [Rr]eserved|無断転載禁止|無断複製禁止',
-        'year': r'\b(19|20)\d{2}\b|[令平昭]\d{1,2}年',
-        'publisher': r'(?:©|Copyright|著作権)\s*(\d{4}年?)?(\d{4})?\s*([ぁ-んァ-ヶー一-龠A-Z][ぁ-んァ-ヶー一-龠a-zA-Z\s&株式会社]+)',
-    }
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_name)
     
-    matches = {}
-    for key, pattern in patterns.items():
-        matches[key] = re.findall(pattern, text)
+    # ダウンロードと検証
+    image_bytes = blob.download_as_bytes()
+    image = Image.open(io.BytesIO(image_bytes))
     
-    return {
-        'raw_text': text,
-        'copyright_indicators': matches,
-        'confidence': calculate_ocr_confidence(results)
-    }
+    # 検証
+    if image.format not in ['JPEG', 'PNG', 'WEBP']:
+        raise ValueError(f"Unsupported format: {image.format}")
+    
+    # 寸法の正規化 (アスペクト比を保持)
+    max_dimension = 2048
+    if max(image.size) > max_dimension:
+        image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+    
+    # 必要に応じてRGBへ変換
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # 正規化されたバージョンを保存
+    output_buffer = io.BytesIO()
+    image.save(output_buffer, format='JPEG', quality=95)
+    
+    # 処理用バケットへアップロード
+    processed_blob = bucket.blob(f"processed/{file_name}")
+    processed_blob.upload_from_string(
+        output_buffer.getvalue(),
+        content_type='image/jpeg'
+    )
+    
+    # ダウンストリーム処理のためにPub/Subへパブリッシュ
+    publish_to_processing_queue({
+        'image_path': f"gs://{bucket_name}/processed/{file_name}",
+        'original_path': f"gs://{bucket_name}/{file_name}",
+        'dimensions': image.size,
+        'format': 'JPEG'
+    })
+
 ```
 
-**OCR用前処理**:
-- グレースケール変換
-- コントラスト強調（CLAHE）
-- 傾き補正/回転補正
-- ノイズ除去
+**フロー:**
+ユーザーアップロード → 署名付きURL → Cloud Storage → ストレージトリガー
+→ 前処理Function → 検証 → Pub/Sub → 処理パイプライン
 
 ---
 
-### 4. **判定エンジン**
+### 2. 視覚的類似性パイプライン
 
-**スコアリングアルゴリズム**:
+これは、すべてGCPネイティブの技術を用いた、複数の補完的な技術を使用するコアとなるマッチングエンジンです。
+
+#### A. 知覚的ハッシュ (Perceptual Hashing - 高速な近似マッチング)
+
+**GCPでの実装:**
 
 ```python
-def calculate_copyright_score(visual_results, ocr_results):
-    # 視覚類似度コンポーネント（0-100）
-    visual_score = 0
+# Cloud Runサービスとしてデプロイ
+from flask import Flask, request, jsonify
+from google.cloud import storage, firestore
+from imagehash import phash, dhash, whash, average_hash
+from PIL import Image
+import io
+
+app = Flask(__name__)
+db = firestore.Client()
+
+@app.route('/hash', methods=['POST'])
+def generate_hashes():
+    """
+    堅牢性のために複数の知覚的ハッシュを生成する
+    """
+    data = request.json
+    image_path = data['image_path']
     
-    if visual_results['top_match_similarity'] > 0.95:
-        visual_score = 100
-    elif visual_results['top_match_similarity'] > 0.85:
-        visual_score = 80
-    elif visual_results['top_match_similarity'] > 0.70:
-        visual_score = 50
-    elif visual_results['perceptual_hash_distance'] < 5:
-        visual_score = 70
+    # Cloud Storageからダウンロード
+    storage_client = storage.Client()
+    bucket_name, blob_name = parse_gcs_path(image_path)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
     
-    # OCRコンポーネント（0-100）
-    ocr_score = 0
-    indicators = ocr_results['copyright_indicators']
+    image_bytes = blob.download_as_bytes()
+    image = Image.open(io.BytesIO(image_bytes))
     
-    if indicators['copyright_symbol']:
-        ocr_score += 40
-    if indicators['copyright_word']:
-        ocr_score += 30
-    if indicators['rights_reserved']:
-        ocr_score += 20
-    if indicators['publisher']:
-        ocr_score += 30
+    # 冗長性のために複数のハッシュを生成
+    hashes = {
+        'phash': str(phash(image, hash_size=16)),      # 16x16 = 256 bits
+        'dhash': str(dhash(image, hash_size=16)),
+        'whash': str(whash(image, hash_size=16)),
+        'average_hash': str(average_hash(image, hash_size=16))
+    }
     
-    ocr_score = min(ocr_score, 100)
+    return jsonify({
+        'hashes': hashes,
+        'image_path': image_path
+    })
+
+def find_similar_by_hash(query_hashes, threshold=10):
+    """
+    ハミング距離を使用してFirestoreから類似ハッシュをクエリする
+    閾値: 最大ビット差 (16x16ハッシュの場合は0-256)
+    """
+    results = []
     
-    # 重み付け組み合わせ
-    final_score = (visual_score * 0.70) + (ocr_score * 0.30)
+    # リファレンスデータベースに対してクエリを実行
+    # 注意: Firestoreはハミング距離をネイティブでサポートしていないため、
+    # 候補を取得してメモリ内で計算する
     
-    # 信頼度分類
-    if final_score >= 85:
-        classification = "高リスク"
-    elif final_score >= 60:
-        classification = "中リスク"
-    elif final_score >= 40:
-        classification = "低リスク"
-    else:
-        classification = "最小リスク"
+    ref_docs = db.collection('perceptual_hashes').stream()
     
-    return {
-        'overall_score': final_score,
-        'classification': classification,
-        'visual_score': visual_score,
-        'ocr_score': ocr_score,
-        'evidence': {
-            'matched_images': visual_results['top_matches'],
-            'copyright_text': ocr_results['raw_text'],
-            'detected_indicators': indicators
+    for doc in ref_docs:
+        ref_hashes = doc.to_dict()
+        
+        # 各ハッシュタイプについてハミング距離を計算
+        distances = {
+            'phash': hamming_distance(query_hashes['phash'], ref_hashes['phash']),
+            'dhash': hamming_distance(query_hashes['dhash'], ref_hashes['dhash']),
+            'whash': hamming_distance(query_hashes['whash'], ref_hashes['whash']),
         }
+        
+        # いずれかのハッシュが閾値を下回れば、マッチとみなす
+        min_distance = min(distances.values())
+        
+        if min_distance <= threshold:
+            results.append({
+                'ref_id': doc.id,
+                'distances': distances,
+                'min_distance': min_distance,
+                'match_type': 'perceptual_hash'
+            })
+    
+    # 最小距離でソート
+    results.sort(key=lambda x: x['min_distance'])
+    return results[:10]  # 上位10件の一致
+
+def hamming_distance(hash1, hash2):
+    """2つのハッシュ間のハミング距離を計算"""
+    return bin(int(hash1, 16) ^ int(hash2, 16)).count('1')
+
+```
+
+**ストレージ戦略:**
+
+* **Firestore:** ハッシュ値をメタデータと共に保存
+* コレクション: `perceptual_hashes`
+* ドキュメント構造: `{ "image_id": "copyright_img_12345", "phash": "...", "publisher": "PublisherX", ... }`
+
+
+
+**大規模化への最適化:**
+
+* ハッシュ参照キャッシュに **Memorystore (Redis)** を使用
+* RedisにBK木構造を実装し、準線形時間のハミング距離クエリを実現
+* 分散クエリ用にハッシュプレフィックスでパーティショニング
+
+#### B. ディープラーニング埋め込み (意味的類似性)
+
+**Vertex AI Multimodal Embeddings API:**
+
+```python
+# 埋め込み生成用 Cloud Run サービス
+from google.cloud import aiplatform
+from google.cloud import storage
+import base64
+
+aiplatform.init(project='your-project-id', location='us-central1')
+
+def generate_multimodal_embedding(image_gcs_path):
+    """
+    Vertex AI Multimodal Embeddings を使用して埋め込みを生成
+    サポート次元: 128, 256, 512, 1408
+    """
+    
+    # 画像の読み込み処理... (省略)
+    
+    # Vertex AI Multimodal Embeddings API の呼び出し
+    from vertexai.vision_models import MultiModalEmbeddingModel
+    
+    model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
+    
+    embeddings = model.get_embeddings(
+        image=aiplatform.gapic.types.Image(image_bytes=image_bytes),
+        dimension=1408  # 最高品質
+    )
+    
+    return {
+        'embedding': embeddings.image_embedding,
+        'dimension': 1408,
+        'model': 'multimodalembedding@001'
     }
+
+# 代替案: GKE上のセルフホストCLIP
+def generate_clip_embedding_gke(image_bytes):
+    """
+    コスト最適化またはカスタムモデルの場合、
+    GPUノードを持つGKE上にCLIPをデプロイする
+    """
+    # (コード省略: PyTorchとTransformersを使用)
+    pass
+
 ```
 
-**説明可能性機能**:
-- マッチした参照画像IDとサムネイルを返す
-- 検出された著作権テキストをバウンディングボックスでハイライト
-- 類似度ヒートマップを表示（視覚的マッチが発生した場所）
-- 理由を提供（例:「画像ID 12345と94%の視覚的類似性でマッチ + ©記号検出」）
+**モデル選択マトリックス:**
+
+| ユースケース | 推奨モデル | 次元数 | デプロイメント |
+| --- | --- | --- | --- |
+| **本番環境 (マネージド)** | Vertex AI Multimodal | 1408 | フルマネージドAPI |
+| **コスト最適化** | Vertex AI Multimodal | 512 | マネージドAPI |
+| **カスタムファインチューニング** | CLIP ViT-L/14 on GKE | 768 | GKE GPUノード |
+| **超低レイテンシ** | CLIP ViT-B/32 on GKE | 512 | GKE GPUノード |
+| **最高精度** | DINOv2 ViT-g/14 on GKE | 1536 | GKE GPUノード |
+
+#### C. Vertex AI Vector Search (Matching Engine)
+
+**インデックス作成と設定:**
+
+```python
+def create_vector_search_index():
+    """
+    効率的な類似性検索のためにVertex AI Vector Searchインデックスを作成
+    """
+    # ... (クライアント初期化)
+    
+    # インデックス設定の定義
+    index_config = {
+        "display_name": "copyright-image-embeddings",
+        "description": "著作権検知用ベクトル検索インデックス",
+        "metadata": {
+            "config": {
+                "dimensions": 1408,
+                "approximate_neighbors_count": 150,
+                "distance_measure_type": "COSINE_DISTANCE", # コサイン類似度
+                "algorithm_config": {
+                    "tree_ah_config": {
+                        "leaf_node_embedding_count": 500,
+                        "leaf_nodes_to_search_percent": 7
+                    }
+                },
+                "shard_size": "SHARD_SIZE_SMALL"
+            }
+        },
+        "index_update_method": "STREAM_UPDATE"  # リアルタイム更新
+    }
+    # ... (作成処理)
+
+def search_similar_images(query_embedding, top_k=10):
+    """
+    Vertex AI Vector Searchで類似画像をクエリ
+    """
+    # ... (リクエスト作成とレスポンス処理)
+    
+    # 結果のパース
+    matches = []
+    for neighbor in response.nearest_neighbors[0].neighbors:
+        matches.append({
+            'id': neighbor.datapoint.datapoint_id,
+            'distance': neighbor.distance,
+            'similarity_score': 1 - neighbor.distance  # 距離を類似度に変換
+        })
+    
+    return matches
+
+```
+
+**バッチインデックスパイプライン:**
+
+* `batch_index_reference_images()`: 著作権付き参照画像をバッチ処理し、Vector Searchに追加する。
+* `upload_to_vector_search()`: Vertex AI Vector Searchへのストリーム更新を行う。
+
+**パフォーマンス特性:**
+
+* **クエリレイテンシ:** 1000万ベクトルで50-100ms (p95)
+* **スループット:** エンドポイントあたり 1000+ QPS
+* **インデックス更新:** リアルタイムストリーミング更新 (< 1分で反映)
+* **スケーラビリティ:** 自動シャーディングにより数十億ベクトルまで対応
 
 ---
 
-## クラウド展開アーキテクチャ
+### 3. OCRパイプライン
 
-### **推奨スタック**
+GCPサービスを用いたマルチエンジンアプローチ:
 
-**インフラストラクチャ**: AWS/GCP/Azure（AWSの例）
+#### A. Cloud Vision API (プライマリOCR)
+
+```python
+def detect_copyright_text_vision_api(image_gcs_path):
+    """
+    包括的なテキスト検出のためにCloud Vision APIを使用
+    """
+    # DOCUMENT_TEXT_DETECTION を使用して高密度テキストに対応
+    # ... (API呼び出しとテキスト抽出)
+    pass
+
+def analyze_copyright_patterns(ocr_result):
+    """
+    著作権インジケーターのパターンマッチング
+    """
+    # 正規表現パターン
+    patterns = {
+        'copyright_symbol': r'[©Ⓒⓒ℗®™]',          # 著作権記号
+        'copyright_word': r'\b[Cc]opyright\b',     # "Copyright" 単語
+        'rights_reserved': r'\b[Aa]ll\s+[Rr]ights\s+[Rr]eserved\b',
+        'year_basic': r'\b(19|20)\d{2}\b',         # 年号
+        # ... (出版社パターンなど)
+    }
+    
+    # ... (マッチング処理と信頼度計算)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     CloudFront CDN                       │
-│                  (API配信)                               │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│              Application Load Balancer                   │
-└────────────────────┬────────────────────────────────────┘
-                     │
-         ┌───────────┴───────────┐
-         ▼                       ▼
-┌──────────────────┐    ┌──────────────────┐
-│   ECS Fargate    │    │   ECS Fargate    │
-│  (APIサービス)    │    │ (ワーカーサービス)│
-│  • FastAPI       │    │  • 画像処理      │
-│  • 非同期キュー   │    │  • GPUインスタンス│
-└────────┬─────────┘    └────────┬─────────┘
-         │                       │
-         ▼                       ▼
-┌──────────────────┐    ┌──────────────────┐
-│   Amazon SQS     │    │   S3バケット     │
-│  (ジョブキュー)   │    │  • 入力画像      │
-└──────────────────┘    │  • 参照DB        │
-                        └──────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│          処理インフラストラクチャ             │
-│  ┌────────────┐  ┌────────────┐            │
-│  │  ECS GPU   │  │  Lambda    │            │
-│  │  (CLIP)    │  │  (OCR)     │            │
-│  └────────────┘  └────────────┘            │
-└────────────┬────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────────────┐
-│           データストレージレイヤー            │
-│  • Pinecone/Milvus（ベクトルDB）            │
-│  • ElastiCache Redis（ハッシュストレージ）  │
-│  • RDS PostgreSQL（メタデータ）             │
-│  • DynamoDB（結果キャッシュ）               │
-└─────────────────────────────────────────────┘
-```
 
-### **スケーリング考慮事項**
+#### B. Document AI (複雑なドキュメント向け)
 
-**コンピュート**:
-- **APIレイヤー**: 自動スケーリングECSタスク（CPUベーススケーリング）
-- **GPUワーカー**: g4dn.xlargeまたはp3.2xlargeインスタンス（埋め込み抽出用）
-- **OCRワーカー**: Lambda（軽負荷用）またはCPU集約型ECSタスク
+* PDFや複数ページのドキュメント内の複雑な著作権表示に対して使用。
+* `copyright_year`、`publisher`などのエンティティを認識するようにトレーニング可能。
 
-**ストレージ**:
-- **参照画像**: S3 Standard（CloudFront配信付き）
-- **ベクトル埋め込み**: Pinecone（マネージドスケーリング）またはMilvusクラスター
-- **メタデータ**: 読み取りレプリカ付きRDS PostgreSQL
+#### C. Natural Language API (エンティティおよびセンチメント分析)
 
-**パフォーマンス目標**:
-- **リアルタイム**: 単一画像で2秒未満（キャッシュがウォーム状態）
-- **バッチ**: ワーカーノードあたり10,000枚以上の画像/時間
-- **スループット**: 水平スケーリングで1日あたり数百万枚の画像に対応
+* コンテキストを理解し、テキストから組織名（Organization）や人名（Person）などのエンティティを抽出するために使用。
+
+**OCRパイプライン・オーケストレーション (Cloud Workflows):**
+`ocr_vision` (視覚) → `analyze_patterns` (パターン分析) → `entity_extraction` (エンティティ抽出) → 結果の統合
 
 ---
 
-## 処理モード
+### 4. 判定エンジン
 
-### **1. リアルタイム処理**
-```
-アップロード → 即時処理 → 3秒以内にレスポンス
-```
-- 使用例: コンテンツモデレーション、アップロードスクリーニング
-- アーキテクチャ: 同期API + ウォームGPUインスタンス
+包括的なスコアリングシステム (Cloud Functions):
 
-### **2. バッチ処理**
-```
-一括アップロード → キュー → 並列ワーカー → 集約レポート
-```
-- 使用例: 定期監査、大規模データセットスクリーニング
-- アーキテクチャ: SQS + 自動スケーリングワーカーフリート
+```python
+@functions_framework.http
+def calculate_copyright_score(request):
+    """
+    すべての分析結果を結合するメイン判定エンジン
+    """
+    # ...
+    
+    # 1. 視覚的類似性スコア (0-100)
+    visual_score = calculate_visual_score(visual_results)
+    
+    # 2. OCR著作権インジケータースコア (0-100)
+    ocr_score = calculate_ocr_score(ocr_results)
+    
+    # 3. メタデータ整合性スコア (0-100)
+    metadata_score = calculate_metadata_score(...)
+    
+    # 4. 重み付けされた最終スコア
+    weights = {
+        'visual': 0.60,      # 視覚的一致が主要なシグナル
+        'ocr': 0.30,         # 著作権テキストは強力なインジケーター
+        'metadata': 0.10     # メタデータ整合性チェック
+    }
+    
+    final_score = (...)
+    
+    # 5. リスク分類
+    classification = classify_risk(final_score, visual_results, ocr_results)
+    
+    # 6. 説明文の生成 (Explainability)
+    explanation = generate_explanation(...)
+    
+    # 7. 証拠のコンパイル
+    evidence = compile_evidence(...)
+    
+    # ... (Firestoreへの保存とJSON返却)
 
-### **3. スケジュールスキャン**
 ```
-データベースクロール → 更新された参照ライブラリと比較
-```
-- 使用例: 新しい著作権素材に対する既存コンテンツの監視
-- アーキテクチャ: Cronジョブ + 増分インデックス
+
+* **calculate_visual_score:** ベクトル類似度とハッシュ距離に基づいてスコアリング。
+* **calculate_ocr_score:** ©記号、年号、所有者情報などが揃っている場合にボーナス点を付与。
+* **classify_risk:** スコアに基づき `CRITICAL` (要即時確認) から `MINIMAL` (アクション不要) まで分類。
+* **generate_explanation:** 「画像は著作権付き参照画像Xと95%の視覚的類似性があります」といった人間が読める説明を生成。
 
 ---
 
-## 技術スタック概要
+### 5. オーケストレーションとワークフロー
 
-| コンポーネント | 推奨技術 | 代替案 |
-|-----------|---------|--------|
-| **APIフレームワーク** | FastAPI (Python) | Flask, Express.js |
-| **画像処理** | Pillow, OpenCV | scikit-image |
-| **パーセプチュアルハッシュ** | ImageHashライブラリ | カスタム実装 |
-| **ディープラーニング** | PyTorch + Transformers | TensorFlow |
-| **埋め込みモデル** | CLIP ViT-L/14 | DINOv2, ResNet |
-| **ベクトルDB** | Pinecone, Milvus | FAISS, Weaviate |
-| **OCRエンジン** | EasyOCR, PaddleOCR | Tesseract, クラウドAPI |
-| **メッセージキュー** | AWS SQS, Kafka | RabbitMQ, Redis Streams |
-| **オブジェクトストレージ** | AWS S3 | GCS, Azure Blob |
-| **メタデータDB** | PostgreSQL | MongoDB, DynamoDB |
-| **キャッシング** | Redis | Memcached |
-| **オーケストレーション** | Kubernetes, ECS | Docker Swarm |
-| **監視** | Prometheus + Grafana | CloudWatch, Datadog |
+**Cloud Workflows 定義:**
+メインフローは以下のステップを実行します：
+
+1. **初期化:** 入力パラメータの割り当て。
+2. **並列処理:**
+* **視覚パイプライン:** ハッシュ生成 → 埋め込み生成 → 類似検索。
+* **OCRパイプライン:** OCR検出 → 著作権分析。
+
+
+3. **判定エンジン:** 両パイプラインの結果を集約して判定。
+4. **保存と通知:** Firestoreへ保存し、重要度が高い場合はWebhookでアラート送信。
 
 ---
 
-## 実装ロードマップ
+## クラウドデプロイメントアーキテクチャ
 
-**フェーズ1: MVP（4-6週間）**
-- 取り込みAPIのセットアップ
-- パーセプチュアルハッシュパイプラインの実装
-- 基本的なOCR統合（Tesseract）
-- シンプルなスコアリングアルゴリズム
-- PostgreSQLメタデータストレージ
+### GCPインフラストラクチャスタック
 
-**フェーズ2: 強化されたマッチング（6-8週間）**
-- CLIP埋め込みの統合
-- ベクトルデータベースのデプロイ（Pinecone/Milvus）
-- マルチOCRエンジンサポート
-- MLベーススコアリングによる改善された判定エンジン
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                    Cloud Load Balancing                       │
+│              (グローバル HTTPS ロードバランサ)                 │
+└──────────────┬──────────────────────────────────────────────┬┘
+               │                                                 │
+               ▼                                                 ▼
+┌──────────────────────────┐                     ┌────────────────────────┐
+│   Cloud Run (API)        │                     │  Cloud Run (ワーカー)   │
+│  • FastAPI サービス       │                     │  • 埋め込み生成         │
+│  • オートスケール 0-1000   │                     │  • ハッシュ処理         │
+│  • CPU: 4 vCPU           │                     │  • GPU: T4 (オプション) │
+│  • メモリ: 8GB            │                     │  • オートスケール 0-100  │
+└────────┬─────────────────┘                     └───────────┬────────────┘
+         │                                                    │
+         ▼                                                    ▼
+┌──────────────────────────────────────────────────────────────┐
+│                      Cloud Pub/Sub                            │
+│  トピック:                                                     │
+│    • image-uploads (メインキュー)                             │
+│    • priority-checks (リアルタイム)                           │
+│    • batch-processing (一括ジョブ)                            │
+│    • results-notifications                                   │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│                       処理層                                  │
+│  ┌────────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │ Cloud Functions│  │ GKEワークロード│  │ Cloud Workflows │  │
+│  │  • 前処理       │  │  • GPUノード  │  │  • オーケスト   │  │
+│  │  • バリデータ   │  │  • CLIPモデル │  │    レーション   │  │
+│  └────────────────┘  └──────────────┘  └─────────────────┘  │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    GCP AI/ML サービス                         │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ Vertex AI                                             │   │
+│  │  • Multimodal Embeddings API                         │   │
+│  │  • Vector Search (Matching Engine)                   │   │
+│  │  • Prediction Endpoints                              │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ Cloud Vision API                                      │   │
+│  │  • ドキュメントテキスト検出                               │   │
+│  │  • ロゴ検出 (オプション)                                  │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ Document AI (オプション)                               │   │
+│  │  • 複雑なドキュメント処理                                 │   │
+│  └──────────────────────────────────────────────────────┘   │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     データストレージ層                        │
+│  ┌────────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │ Cloud Storage  │  │  Firestore   │  │  Memorystore    │  │
+│  │  • 入力         │  │  • メタデータ │  │  (Redis)        │  │
+│  │  • リファレンス  │  │  • 結果       │  │  • ハッシュ      │  │
+│  │  • サムネイル    │  │  • ジョブ     │  │    キャッシュ    │  │
+│  └────────────────┘  └──────────────┘  └─────────────────┘  │
+│  ┌────────────────┐  ┌──────────────┐                        │
+│  │  BigQuery      │  │  Cloud SQL   │                        │
+│  │  • 分析         │  │  • 監査ログ   │                        │
+│  │  • レポーティング│  │  • ユーザー   │                        │
+│  └────────────────┘  └──────────────┘                        │
+└───────────────────────────────────────────────────────────────┘
 
-**フェーズ3: 本番スケーリング（8-10週間）**
-- Kubernetesデプロイメント
-- GPUアクセラレーション
-- バッチ処理パイプライン
-- 監視とアラート
-- 閾値調整のためのA/Bテストフレームワーク
+```
 
-**フェーズ4: 高度な機能（継続的）**
-- マッチングを改善するためのアクティブラーニング
-- 出版社固有のカスタマイズ
-- ブロックチェーンベースの検出証明
-- DMCA削除ワークフローとの統合
+### 技術スタック概要
 
----
+| コンポーネント | GCPサービス | 構成 | 代替案 |
+| --- | --- | --- | --- |
+| **APIゲートウェイ** | Cloud Run | 4 vCPU, 8GB RAM | Cloud Functions |
+| **メッセージキュー** | Cloud Pub/Sub | Standard tier | - |
+| **画像ストレージ** | Cloud Storage | Multi-regional | - |
+| **知覚的ハッシュ** | Cloud Run | Custom Python | Cloud Functions |
+| **ディープラーニング** | Vertex AI Embeddings | 1408次元 | GKE + CLIP |
+| **ベクトルデータベース** | Vertex AI Vector Search | COSINE, ANN | Self-hosted Milvus on GKE |
+| **OCRエンジン** | Cloud Vision API | DOCUMENT_TEXT | Document AI |
+| **テキスト分析** | Natural Language API | エンティティ抽出 | - |
+| **オーケストレーション** | Cloud Workflows | YAML定義 | Cloud Composer |
+| **メタデータDB** | Firestore | Native mode | Cloud SQL PostgreSQL |
+| **キャッシング** | Memorystore (Redis) | 4GB インスタンス | - |
+| **分析** | BigQuery | On-demand | - |
+| **監視** | Cloud Monitoring | Standard | Cloud Logging |
+| **GPU計算資源** | GKE + T4 GPUs | プリエンプティブルノード | Cloud Run (T4) |
 
-## コスト最適化戦略
+### 処理モード
 
-1. バッチGPUワークロード用に**スポットインスタンス**を使用（60-70%のコスト削減）
-2. 参照画像の**埋め込みをキャッシュ**（一度計算、永続的保存）
-3. **段階的マッチング**: 最初に高速パーセプチュアルハッシュ、不確実なケースのみ高コストのディープラーニング
-4. **遅延OCR**: 視覚的マッチが曖昧な場合のみOCRを実行
-5. **スマート画像前処理**: 埋め込み抽出用に画像をダウンスケール（512x512で十分な場合が多い）
+1. **リアルタイム処理**
+* アップロード → Cloud Run API → Pub/Sub (優先) → 並列処理 → 判定エンジン → レスポンス (< 2秒)
+* **ユースケース:** アップロード時のスクリーニング、コンテンツモデレーション
 
----
 
-## 検討すべき既存サービス・フレームワーク
+2. **バッチ処理**
+* 一括アップロード → Cloud Storage → Cloud Functions (トリガー) → Pub/Sub (バッチ) → ワーカープール → BigQuery (結果)
+* **ユースケース:** 定期監査、データセットのスクリーニング
 
-**商用ソリューション**:
-- **Google Vision API**: 逆画像検索 + OCR（大規模では高価）
-- **Amazon Rekognition**: カスタムラベル + テキスト検出
-- **Microsoft Azure Computer Vision**: 同様の機能
 
-**オープンソースフレームワーク**:
-- **TinEye**: 商用逆画像検索（API利用可能）
-- **PhotoDNA**（Microsoft）: 主に児童安全コンテンツ用
-- **Content Authenticity Initiative (CAI)**: コンテンツ来歴の標準
-
-**ハイブリッドアプローチ**: コストと知的財産を管理するため、一次処理にはカスタムシステムを使用し、検証/スポットチェックには商用APIを使用
-
----
-
-## 主要パフォーマンス指標
-
-システムの健全性を確保するために、以下を監視します:
-
-- **精度（Precision）**: フラグが立てられた画像のうち、実際の侵害である割合
-- **再現率（Recall）**: 実際の侵害のうち検出された割合
-- **レイテンシ**: p50、p95、p99処理時間
-- **スループット**: 1時間あたりに処理された画像数
-- **偽陽性率**: ユーザー信頼性にとって重要
-- **ベクトルDBクエリ時間**: リアルタイム処理には100ms未満であるべき
-- **OCR精度**: 文字/単語レベルの精度
-
----
-
-このアーキテクチャは、モジュール式、スケーラブル、説明可能な本番環境対応の基盤を提供します。MVPコンポーネントから始めて、データセットと要件の増加に応じて段階的に高度化を追加できます。
+3. **スケジュールスキャン**
+* Cloud Scheduler → Cloud Workflows → データベースクエリ → 比較 → アラート
+* **ユースケース:** 既存コンテンツの監視

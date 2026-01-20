@@ -1697,9 +1697,3 @@ Cloud Scheduler → Cloud Workflows → Query Database → Compare → Alert
 - Use case: Monitor existing content
 
 ---
-
-
-### **Phase 2: Enhanced Matching (6-8 weeks)**
-
-**Week 7-9: Vector Search**
-- Set up Vertex AI Multimodal Embeddings
